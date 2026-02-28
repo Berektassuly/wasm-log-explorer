@@ -49,98 +49,120 @@ export type EngineApi = {
   clear: () => Promise<void>;
 };
 
+function wrapWasmCall<T>(fn: () => T): T {
+  try {
+    return fn();
+  } catch (e) {
+    throw e instanceof Error ? e : new Error(String(e));
+  }
+}
+
+async function wrapAsync<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    throw e instanceof Error ? e : new Error(String(e));
+  }
+}
+
 const engineApi: EngineApi = {
   async ingestFile(file: File, onProgress: (p: ProgressPayload) => void): Promise<void> {
-    const w = await loadWasm();
-    w.clear();
+    return wrapAsync(async () => {
+      const w = await loadWasm();
+      w.clear();
 
-    const totalSize = file.size;
-    let bytesProcessed = 0;
-    let linesProcessed = 0;
-    let lastProgressTime = performance.now();
-    let lastBytes = 0;
-    let lastLines = 0;
+      const totalSize = file.size;
+      let bytesProcessed = 0;
+      let linesProcessed = 0;
+      let lastProgressTime = performance.now();
+      let lastBytes = 0;
+      let lastLines = 0;
 
-    const stream = file.stream();
-    const reader = stream.getReader();
-    let buffer = new Uint8Array(CHUNK_SIZE);
-    let bufferOffset = 0;
+      const stream = file.stream();
+      const reader = stream.getReader();
+      let buffer = new Uint8Array(CHUNK_SIZE);
+      let bufferOffset = 0;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      const chunk = value as Uint8Array;
-      let chunkOffset = 0;
+        const chunk = value as Uint8Array;
+        let chunkOffset = 0;
 
-      while (chunkOffset < chunk.length) {
-        const toCopy = Math.min(chunk.length - chunkOffset, buffer.length - bufferOffset);
-        buffer.set(chunk.subarray(chunkOffset, chunkOffset + toCopy), bufferOffset);
-        bufferOffset += toCopy;
-        chunkOffset += toCopy;
+        while (chunkOffset < chunk.length) {
+          const toCopy = Math.min(chunk.length - chunkOffset, buffer.length - bufferOffset);
+          buffer.set(chunk.subarray(chunkOffset, chunkOffset + toCopy), bufferOffset);
+          bufferOffset += toCopy;
+          chunkOffset += toCopy;
 
-        if (bufferOffset === buffer.length) {
-          const ptr = w.get_buffer_pointer(bufferOffset);
-          const mem = new Uint8Array(w.memory.buffer, ptr, bufferOffset);
-          mem.set(buffer.subarray(0, bufferOffset));
-          w.index_chunk(bufferOffset);
-          bytesProcessed += bufferOffset;
-          linesProcessed = w.get_line_count();
-          bufferOffset = 0;
+          if (bufferOffset === buffer.length) {
+            const ptr = wrapWasmCall(() => w.get_buffer_pointer(bufferOffset));
+            const mem = new Uint8Array(w.memory.buffer, ptr, bufferOffset);
+            mem.set(buffer.subarray(0, bufferOffset));
+            wrapWasmCall(() => w.index_chunk(bufferOffset));
+            bytesProcessed += bufferOffset;
+            linesProcessed = wrapWasmCall(() => w.get_line_count());
+            bufferOffset = 0;
 
-          const now = performance.now();
-          const dt = (now - lastProgressTime) / 1000;
-          if (dt >= 0.05) {
-            lastProgressTime = now;
-            const dBytes = bytesProcessed - lastBytes;
-            const dLines = linesProcessed - lastLines;
-            lastBytes = bytesProcessed;
-            lastLines = linesProcessed;
-            onProgress({
-              bytesProcessed,
-              linesProcessed,
-              bytesPerSecond: dt > 0 ? dBytes / dt : 0,
-              linesPerSecond: dt > 0 ? dLines / dt : 0,
-            });
+            const now = performance.now();
+            const dt = (now - lastProgressTime) / 1000;
+            if (dt >= 0.05) {
+              lastProgressTime = now;
+              const dBytes = bytesProcessed - lastBytes;
+              const dLines = linesProcessed - lastLines;
+              lastBytes = bytesProcessed;
+              lastLines = linesProcessed;
+              onProgress({
+                bytesProcessed,
+                linesProcessed,
+                bytesPerSecond: dt > 0 ? dBytes / dt : 0,
+                linesPerSecond: dt > 0 ? dLines / dt : 0,
+              });
+            }
           }
         }
       }
-    }
 
-    if (bufferOffset > 0) {
-      const ptr = w.get_buffer_pointer(bufferOffset);
-      const mem = new Uint8Array(w.memory.buffer, ptr, bufferOffset);
-      mem.set(buffer.subarray(0, bufferOffset));
-      w.index_chunk(bufferOffset);
-      bytesProcessed += bufferOffset;
-      linesProcessed = w.get_line_count();
-    }
+      if (bufferOffset > 0) {
+        const ptr = wrapWasmCall(() => w.get_buffer_pointer(bufferOffset));
+        const mem = new Uint8Array(w.memory.buffer, ptr, bufferOffset);
+        mem.set(buffer.subarray(0, bufferOffset));
+        wrapWasmCall(() => w.index_chunk(bufferOffset));
+        bytesProcessed += bufferOffset;
+        linesProcessed = wrapWasmCall(() => w.get_line_count());
+      }
 
-    onProgress({
-      bytesProcessed: totalSize,
-      linesProcessed,
-      bytesPerSecond: 0,
-      linesPerSecond: 0,
+      onProgress({
+        bytesProcessed: totalSize,
+        linesProcessed,
+        bytesPerSecond: 0,
+        linesPerSecond: 0,
+      });
     });
   },
 
   async getRows(start: number, end: number): Promise<string[]> {
-    const w = await loadWasm();
-    const count = w.get_line_count();
-    if (start >= count) return [];
-    const endClamped = Math.min(end, count);
-    if (start >= endClamped) return [];
-    const arr = w.get_lines(start, endClamped);
-    return Array.isArray(arr) ? arr : Array.from(arr as unknown as Iterable<string>);
+    return wrapAsync(async () => {
+      const w = await loadWasm();
+      const count = wrapWasmCall(() => w.get_line_count());
+      if (start >= count) return [];
+      const endClamped = Math.min(end, count);
+      if (start >= endClamped) return [];
+      const arr = wrapWasmCall(() => w.get_lines(start, endClamped));
+      return Array.isArray(arr) ? arr : Array.from(arr as unknown as Iterable<string>);
+    });
   },
 
   async getLineCount(): Promise<number> {
-    const w = await loadWasm();
-    return w.get_line_count();
+    return wrapAsync(async () => {
+      const w = await loadWasm();
+      return wrapWasmCall(() => w.get_line_count());
+    });
   },
 
   async clear(): Promise<void> {
-    if (wasm) wasm.clear();
+    if (wasm) wrapWasmCall(() => wasm!.clear());
   },
 };
 
