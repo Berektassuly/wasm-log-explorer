@@ -18,6 +18,10 @@ static ENGINE: Lazy<RwLock<LogEngine>> = Lazy::new(|| RwLock::new(LogEngine::new
 
 /// Returns a pointer to the write region for the next chunk. JS should write up to
 /// `size` bytes there, then call `index_chunk(chunk_len)` with the actual length.
+///
+/// **Important:** Do not cache this pointer in JS. Call `get_buffer_pointer(size)` immediately
+/// before each chunk write; if the buffer is reallocated (e.g. by `reserve`), a previously
+/// obtained pointer becomes invalid.
 #[wasm_bindgen]
 pub fn get_buffer_pointer(size: usize) -> *mut u8 {
     ENGINE
@@ -28,6 +32,7 @@ pub fn get_buffer_pointer(size: usize) -> *mut u8 {
 
 /// Indexes the chunk of length `chunk_len` that JS wrote into the buffer. Scans for
 /// newlines and appends line-start offsets. Handles lines split across chunk boundaries.
+/// Buffer content is discarded after indexing so only offsets are kept (avoids 10GB in WASM).
 #[wasm_bindgen]
 pub fn index_chunk(chunk_len: usize) {
     let mut engine = ENGINE.write().expect("engine lock");
@@ -41,6 +46,7 @@ pub fn index_chunk(chunk_len: usize) {
     };
     engine.append_offsets(&line_starts);
     engine.advance_after_chunk(chunk_len, ends_with_newline);
+    engine.discard_buffer_after_indexing();
 }
 
 /// Returns the number of lines indexed so far.
@@ -49,19 +55,53 @@ pub fn get_line_count() -> usize {
     ENGINE.read().expect("engine lock").line_count()
 }
 
-/// Returns lines in the range [start, end) as a JS array of strings (UTF-8 decoded).
-/// Only valid for ranges that have been streamed into the buffer (engine accumulates).
+/// Returns byte ranges (file offsets) for lines [start, end). JS must read the file
+/// for these ranges and call `decode_lines_from_blob` to get strings.
 #[wasm_bindgen]
-pub fn get_lines(start: usize, end: usize) -> JsValue {
+pub fn get_line_byte_ranges(start: usize, end: usize) -> JsValue {
     let engine = ENGINE.read().expect("engine lock");
     let ranges = engine.get_line_ranges(start, end);
     let arr = js_sys::Array::new();
     for (s, e) in ranges {
-        let slice = engine.buffer_slice(s, e);
-        let s = String::from_utf8_lossy(slice).into_owned();
-        arr.push(&JsValue::from(s));
+        let pair = js_sys::Array::new();
+        pair.push(&JsValue::from(s as f64));
+        pair.push(&JsValue::from(e as f64));
+        arr.push(&pair.into());
     }
     arr.into()
+}
+
+/// Decodes lines from a contiguous blob and relative line boundaries. UTF-8 safe:
+/// avoids splitting multi-byte characters at blob boundaries.
+/// `line_ends` — end offset of each line within `blob` (exclusive), so line i = blob[prev_end..line_ends[i]].
+#[wasm_bindgen]
+pub fn decode_lines_from_blob(blob: &js_sys::Uint8Array, line_ends: &js_sys::Uint32Array) -> JsValue {
+    let blob = blob.to_vec();
+    let line_ends: Vec<u32> = line_ends.to_vec();
+    let arr = js_sys::Array::new();
+    let mut start = 0usize;
+    for &end in &line_ends {
+        let end = end as usize;
+        let slice = if end <= blob.len() {
+            &blob[start..end]
+        } else {
+            &blob[start..]
+        };
+        let s = decode_utf8_line_slice(slice);
+        arr.push(&JsValue::from(s));
+        start = end;
+    }
+    arr.into()
+}
+
+/// Decodes a single line slice to String. Trims trailing incomplete UTF-8 (e.g. when a
+/// chunk cut a multi-byte character in the middle) to avoid replacement characters.
+fn decode_utf8_line_slice(slice: &[u8]) -> String {
+    let valid_len = match std::str::from_utf8(slice) {
+        Ok(_) => slice.len(),
+        Err(e) => e.valid_up_to(),
+    };
+    String::from_utf8_lossy(&slice[..valid_len]).into_owned()
 }
 
 /// Clears the engine state (buffer and index). Call between file sessions to free memory.
@@ -70,8 +110,9 @@ pub fn clear() {
     ENGINE.write().expect("engine lock").clear();
 }
 
-/// Searches for `needle` (raw bytes, e.g. from Uint8Array) in all lines.
-/// Returns a JS array of line indices (u32) for lines containing the needle.
+/// Searches for `needle` (raw bytes) in all lines. Returns line indices (u32).
+/// Note: Buffer is cleared after each index_chunk, so this only sees in-memory content.
+/// For full-file search, use a separate flow (e.g. search per chunk during ingest).
 #[wasm_bindgen]
 pub fn search(needle: &js_sys::Uint8Array) -> JsValue {
     let needle = needle.to_vec();

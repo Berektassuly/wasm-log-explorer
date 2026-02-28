@@ -30,6 +30,7 @@ impl LogEngine {
     /// Reserves space for the next chunk of at least `size` bytes and returns a pointer
     /// to the start of that region (at current buffer length). JS writes chunk data here.
     /// Does not change buffer length; call `append_chunk` from `index_chunk` after writing.
+    /// Caller must not cache this pointer: it is invalid after any operation that may reallocate.
     #[inline(always)]
     pub fn get_buffer_pointer(&mut self, size: usize) -> *mut u8 {
         self.buffer.reserve(size);
@@ -57,10 +58,20 @@ impl LogEngine {
     }
 
     /// Advances cumulative byte count and updates boundary state after indexing a chunk.
+    /// Call `discard_buffer_after_indexing()` after this to free chunk memory (keeps only offsets).
     #[inline(always)]
     pub fn advance_after_chunk(&mut self, chunk_len: usize, ended_with_newline: bool) {
         self.total_bytes_indexed += chunk_len as u64;
         self.last_chunk_ended_with_newline = ended_with_newline;
+    }
+
+    /// Discards buffer content while keeping the line-offset index. Use after each `index_chunk`
+    /// to avoid accumulating the full file in WASM memory (WASM32 address space is limited).
+    /// Line content must be obtained by JS reading file byte ranges and calling decode API.
+    #[inline(always)]
+    pub fn discard_buffer_after_indexing(&mut self) {
+        self.buffer.clear();
+        self.buffer.shrink_to_fit();
     }
 
     #[inline(always)]

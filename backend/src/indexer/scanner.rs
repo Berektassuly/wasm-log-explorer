@@ -33,16 +33,15 @@ pub fn scan_chunk(
     }
 
     let base = base_offset as u64;
-    let mut ends_with_newline = false;
 
     for pos in memchr_iter(b'\n', chunk) {
         let off = base + (pos as u64);
         // Line start after this newline is the next byte. Handles both \n and \r\n.
         line_starts.push(off + 1);
-        ends_with_newline = true;
     }
 
-    ends_with_newline
+    // Next chunk starts a new line only if this chunk ends with \n.
+    chunk.last() == Some(&b'\n')
 }
 
 #[cfg(test)]
@@ -69,10 +68,11 @@ mod tests {
 
     #[test]
     fn boundary_no_leading_newline() {
-        let chunk = b"middle\nend";
+        // Chunk does not end with newline; \n at index 6 (\r\n)
+        let chunk = b"middle\r\nend";
         let mut starts = Vec::new();
         let ends = scan_chunk(chunk, 10, &mut starts, false);
         assert!(!ends);
-        assert_eq!(starts, [11]); // one line start after \n
+        assert_eq!(starts, [18]); // line start after \n (base 10 + 7 + 1)
     }
 }
