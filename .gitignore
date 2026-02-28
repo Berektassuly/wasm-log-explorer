@@ -1,0 +1,43 @@
+# Rust / Cargo
+backend/target/
+
+# wasm-bindgen output (if generated in-tree)
+backend/pkg/
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# Build / dist
+dist/
+build/
+*.local
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and debug
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# Vite
+*.local
+
+# Optional: uncomment if you don't want to track lockfiles
+# package-lock.json
+# yarn.lock
+# Cargo.lock
